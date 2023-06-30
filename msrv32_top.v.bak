@@ -1,0 +1,441 @@
+module msrv32_top(ms_riscv32_mp_clk_in
+                  ,ms_riscv32_mp_rst_in 
+                  ,ms_riscv32_mp_instr_hready_in
+                  ,ms_riscv32_mp_dmdata_in
+                  ,ms_riscv32_mp_instr_in
+                  ,ms_riscv32_mp_dmwr_mask_in
+                  ,ms_riscv32_mp_hresp_in
+                  ,ms_riscv32_mp_rc_in
+                  ,ms_riscv32_mp_data_hready_in
+                  ,ms_riscv32_mp_eirq_in
+                  ,ms_riscv32_mp_tirq_in
+                  ,ms_riscv32_mp_sirq_in
+                  ,ms_riscv32_mp_dmwr_req_out
+                  ,ms_riscv32_mp_iadder_out
+                  ,ms_riscv32_mp_dmaddr_out 
+                  ,ms_riscv32_mp_dmdata_out
+                  ,ms_riscv32_mp_data_htrans_out
+                  ,ms_riscv32_mp_dmwr_mask_out);
+
+//declaring ports
+input ms_riscv32_mp_clk_in, ms_riscv32_mp_rst_in, ms_riscv32_mp_instr_hready_in, ms_riscv32_mp_hresp_in;
+input ms_riscv32_mp_data_hready_in, ms_riscv32_mp_eirq_in, ms_riscv32_mp_tirq_in, ms_riscv32_mp_sirq_in;
+input [31:0] ms_riscv32_mp_dmdata_in, ms_riscv32_mp_instr_in;
+input [3:0] ms_riscv32_mp_dmwr_mask_in;
+input [63:0] ms_riscv32_mp_rc_in;
+
+output ms_riscv32_mp_dmwr_req_out;
+output [31:0] ms_riscv32_mp_iadder_out, ms_riscv32_mp_dmaddr_out, ms_riscv32_mp_dmdata_out;
+output [1:0] ms_riscv32_mp_data_htrans_out;
+output [3:0] ms_riscv32_mp_dmwr_mask_out;
+
+//declaring all parameters
+parameter BOOT_ADDRESS = 32'h 00000000;
+
+//ALU PARAMETERS
+parameter ALU_ADD  = 4'b 0000;
+parameter ALU_SUB  = 4'b 1000;
+parameter ALU_SLT  = 4'b 0010;
+parameter ALU_SLTU = 4'b 0011;
+parameter ALU_AND  = 4'b 0111;
+parameter ALU_OR   = 4'b 0110; 
+parameter ALU_XOR  = 4'b 0100;
+parameter ALU_SLL  = 4'b 0001;
+parameter ALU_SRL  = 4'b 0101;
+parameter ALU_SRA  = 4'b 1101;
+
+//branch unit parameters
+parameter jal    = 5'b 11011;
+parameter jalr   = 5'b 11001;
+parameter branch = 5'b 11000;
+
+//decoder parameters
+parameter OPCODE_BRANCH   = 5'b11000;
+parameter OPCODE_JAL      = 5'b11011;
+parameter OPCODE_JALR     = 5'b11001;
+parameter OPCODE_AUIPC    = 5'b00101;
+parameter OPCODE_LUI      = 5'b01101;
+parameter OPCODE_OP       = 5'b01100;
+parameter OPCODE_OP_IMM   = 5'b00100;
+parameter OPCODE_LOAD     = 5'b00000;
+parameter OPCODE_STORE    = 5'b01000;
+parameter OPCODE_SYSTEM   = 5'b11100;
+parameter OPCODE_MISC_MEM = 5'b00011;
+
+parameter FUNCT3_ADD   = 3'b000;
+parameter FUNCT3_SUB   = 3'b000;
+parameter FUNCT3_SLT   = 3'b010;
+parameter FUNCT3_SLTU  = 3'b011;
+parameter FUNCT3_AND   = 3'b111;
+parameter FUNCT3_OR    = 3'b110;
+parameter FUNCT3_XOR   = 3'b100;
+parameter FUNCT3_SLL   = 3'b001;
+parameter FUNCT3_SRL   = 3'b101;
+parameter FUNCT3_SRA   = 3'b101;
+
+//wrie back mux parameters
+parameter WB_ALU           = 3'b 000;
+parameter WB_LU            = 3'b 001;
+parameter WB_IMM           = 3'b 010;
+parameter WB_IADDER_OUT    = 3'b 011;
+parameter WB_CSR           = 3'b 100;
+parameter WB_PC_PLUS       = 3'b 101;
+
+//Internal wires and registers
+//-------------------------------------------------------------------------//
+//pcmux part and regblock 1 part//
+wire [1:0]  pc_src;
+wire [31:0] pc;
+wire [31:0] epc;
+wire [31:0] trap_address;
+wire [31:0]  iaddr;
+wire branch_taken;
+wire pc_plus_4;
+wire misaligned_instr;
+wire [31:0] pc_mux;
+
+//Instruction mux part//
+wire flush;
+wire [6:0] opcode;
+wire [2:0] funct3;
+wire [6:0] funct7;
+wire [4:0] rs1addr;
+wire [4:0] rs2addr;
+wire [4:0] rdaddr;
+wire [11:0] csr_addr;
+wire [31:0] instr;
+
+//imm gen
+wire [31:0] imm;
+wire [2:0]  imm_type;
+
+//imm adder
+wire [31:0] rs_1;
+wire [31:0] iadder;
+wire iadder_src;
+
+//decoder
+wire trap_taken_in1;
+wire [2:0] wb_mux_sel;
+wire mem_wr_req;
+wire [2:0] csr_op;
+wire [3:0] alu_opcode;
+wire [1:0] load_size;
+wire load_unsigned;
+wire alu_src;
+wire csr_wr_en;
+wire rf_wr_en;
+wire illegal_instr;
+wire misaligned_load;
+wire misaligned_store;
+
+//Branch unit
+wire [31:0] rs_2;
+
+//Integer file
+wire [31:0] rd;
+wire int_file_wr_en;
+
+//Write enable generator
+wire csr_file_wr_en;
+wire rf_wr_en_reg;
+wire csr_wr_en_reg;
+
+//regblock 2
+wire [11:0] csr_addr_reg;
+wire [31:0] rs1_reg;
+wire [31:0] rs2_reg;
+wire [4:0] rd_addr_reg;
+wire [31:0] pc_plus_4_reg;
+wire [31:0] pc_reg;
+wire [3:0]  alu_opcode_reg;
+wire [1:0] load_size_reg;
+wire load_unsigned_reg;
+wire alu_src_reg;
+wire [2:0] wb_mux_sel_reg;
+wire [2:0] csr_op_reg;
+wire [31:0] imm_reg;
+wire [31:0] iadder_out_reg;
+
+//load
+wire [31:0]lu_output;
+
+//alu
+wire [31:0] result;
+wire [31:0] op_2;
+
+//WB_MUX
+wire [31:0] csr_data;
+
+//csr file
+wire i_or_e;
+wire [3:0]cause;
+wire instret_inc;
+wire mie_clear;
+wire mie_set;
+wire misaligned_exception;
+wire set_epc;
+wire set_cause;
+wire mie;
+wire meie;
+wire mtie;
+wire msie;
+wire meip;
+wire mtip;
+wire msip;
+//------------------------------------------------------------------------//
+//pipeline stage 1
+//pc mux instantiation
+msrv32_pc PC (.branch_taken_in(branch_taken),
+              .rst_in(ms_riscv32_mp_rst_in),
+              .ahb_ready_in(ms_riscv32_mp_instr_hready_in),
+              .trap_address_in(trap_address),
+              .pc_in(pc),
+              .pc_src_in(pc_src),
+              .epc_in(epc),
+              .iaddr_in(iaddr[31:1]),
+              .pc_plus_4_out(pc_plus_4),
+              .iaddr_out(ms_riscv32_mp_iadder_out),
+              .pc_mux_out(pc_mux),
+              .misaligned_instr_logic_out(misaligned_instr));
+
+//Reg block 1
+msrv32_reg_block_1 REG1 (.pc_mux_in(pc_mux),
+                         .ms_riscv32_mp_clk_in(ms_riscv32_mp_clk_in),
+                         .ms_riscv32_mp_rst_in(ms_riscv32_mp_rst_in), 
+                         .pc_out(pc));
+
+//------------------------------------------------------------------------//
+
+//pipeline stage 2 (part1)
+//Instruction mux
+msrv32_instruction_mux IM  (.flush_in(flush),
+                            .ms_riscv32_mp_instr_in(ms_riscv32_mp_instr_in), 
+                            .opcode_out(opcode), 
+                            .funct3_out(funct3),
+                            .funct7_out(funct7), 
+                            .rs1addr_out(rs1addr), 
+                            .rs2addr_out(rs2addr),  
+                            .rdaddr_out(rdaddr), 
+                            .csr_addr_out(csr_addr),
+                            .instr_out(instr[31:7]));
+
+//Immediate Generator
+msrv32_imm_generator IG (.instr_in(instr[31:7]),
+                         .imm_type_in(imm_type), 
+                         .imm_out(imm));
+
+//Immediate adder
+msrv32_immediate_adder IA (.pc_in(pc),
+                           .rs_1_in(rs_1),
+                           .imm_in(imm), 
+                           .iadder_src_in(iadder_src), 
+                           .iadder_out(iadder));
+
+//Decoder 
+msrv32_decoder DEC (.trap_taken_in(trap_taken_in1), 
+                    .funct7_5_in(funct7), 
+                    .opcode_in(opcode), 
+                    .funct3_in(funct3),
+                    .iadder_out_1_to_0_in(iadder[1:0]),
+                    .wb_mux_sel_out(wb_mux_sel), 
+                    .imm_type_out(imm_type),
+                    .csr_op_out(csr_op), 
+                    .mem_wr_req_out(mem_wr_req), 
+                    .load_unsigned_out(load_unsigned),
+                    .alu_src_out(alu_src), 
+                    .iadder_src_out(iadder_src),
+                    .csr_wr_en_out(csr_wr_en), 
+                    .rf_wr_en_out(rf_wr_en), 
+                    .illegal_instr_out(illegal_instr),
+                    .misaligned_load_out(misaligned_load),
+                    .misaligned_store_out(misaligned_store),
+                    .alu_opcode_out(alu_opcode), 
+                    .load_size_out(load_size));
+
+//Branch Unit
+msrv32_branch_unit BU (.opcode_6_to_2_in(opcode[6:2]), 
+                       .rs1_in(rs_1),
+                       .rs2_in(rs_2), 
+                       .funct3_in(funct3),
+                       .branch_taken_out(branch_taken));
+
+//integer file
+msrv32_integer_file IT  (.ms_riscv32_mp_clk_in(ms_riscv32_mp_clk_in), 
+                         .ms_riscv32_mp_rst_in(ms_riscv32_mp_rst_in), 
+                         .rs_1_addr_in(rs1addr),
+                         .rs_2_addr_in(rs2addr),
+                         .rd_in(rd),
+                         .rd_addr_in(rd_addr_reg), 
+                         .wr_en_in(int_file_wr_en),
+                         .rs_1_out(rs_1), 
+                         .rs_2_out(rs_2));
+
+//Write enable generator
+msrv32_wr_en_generator WEG (.flush_in(flush), 
+                            .rf_wr_en_reg_in(rf_wr_en_reg), 
+                            .csr_wr_en_reg_in(csr_wr_en_reg),
+                            .wr_en_integer_file_out(int_file_wr_en),
+                            .wr_en_csr_file_out(csr_file_wr_en));
+
+//-------------------------------------------------------------------------------//
+
+//pipeline stage 2 (part2)
+//Store unit
+msrv32_store_unit SU (.rs2_in(rs_2), 
+                      .iadder_in(iadder), 
+                      .funct3_in(funct3), 
+                      .mem_wr_req_in(mem_wr_req), 
+                      .ahb_ready_in(ms_riscv32_mp_instr_hready_in),
+                      .ms_riscv32_mp_dm_data_out(ms_riscv32_mp_dm_data_out), 
+                      .ms_riscv32_mp_dm_addr_out(ms_riscv32_mp_dm_addr_out),
+                      .ms_riscv32_mp_dmwr_req_out(ms_riscv32_mp_dmwr_req_out),
+                      .ahb_htrans_out(ms_riscv32_mp_data_htrans_out), 
+                      .ms_riscv32_mp_dmwr_mask_out(ms_riscv32_mp_dmwr_mask_out));
+
+
+//reg block2 
+msrv32_reg_block2 DUT (.clk_in(ms_riscv32_mp_clk_in), 
+                       .reset_in(ms_riscv32_mp_rst_in), 
+                       .branch_taken_in(branch_taken), 
+                       .load_unsigned_in(load_unsigned),
+                       .alu_src_in(alu_src), 
+                       .csr_wr_en_in(csr_wr_en),
+                       .rf_wr_en_in(rf_wr_en), 
+                       .rs1_in(rs_1), 
+                       .rs2_in(rs_2),
+                       .rd_addr_in(rdaddr), 
+                       .pc_in(pc), 
+                       .pc_plus_4_in(pc_plus_4), 
+                       .iadder_in(iadder), 
+                       .imm_in(imm), 
+                       .wb_mux_sel_in(wb_mux_sel), 
+                       .csr_op_in(csr_op),
+                       .alu_opcode_in(alu_opcode),
+                       .load_size_in(load_size), 
+                       .csr_addr_in(csr_addr), //
+                       .load_unsigned_reg_out(load_unsigned_reg), 
+                       .alu_src_reg_out(alu_src_reg),
+                       .csr_wr_en_reg_out(csr_wr_en_reg),
+                       .rf_wr_en_reg_out(rf_wr_en_reg),
+                       .rs1_reg_out(rs1_reg), .rs2_reg_out(rs2_reg), 
+                       .pc_reg_out(pc_reg), 
+                       .imm_reg_out(imm_reg),
+                       .pc_plus_4_reg_out(pc_plus_4_reg), 
+                       .iadder_out_reg_out(iadder_out_reg),  
+                       .wb_mux_sel_reg_out(wb_mux_sel_reg),
+                       .csr_op_reg_out(csr_op_reg), 
+                       .csr_addr_reg_out(csr_addr_reg), 
+                       .rd_addr_reg_out(rd_adddr_reg), 
+                       .alu_opcode_reg_out(alu_opcode_reg), 
+                       .load_size_reg_out(load_size_reg));
+
+//csr_file
+
+ msrv32_csr_file CSR  (.clk_in(ms_riscv32_mp_clk_in),
+                       .rst_in(ms_riscv32_mp_rst_in),
+                       .wr_en_in(csr_file_wr_en),
+		       .csr_addr_in(csr_addr_reg),
+		       .csr_op_in(csr_op_reg),
+		       .csr_uimm_in(imm_reg[4:0]),
+		       .csr_data_in(rs1_reg),
+		       .pc_in(pc_reg),
+                       .iadder_in(iadder_reg_out),
+		       .e_irq_in(ms_riscv32_mp_eirq_in),
+                       .s_irq_in(ms_riscv32_mp_sirq_in),
+                       .t_irq_in(ms_riscv32_mp_tirq_in),
+                       .i_or_e_in(i_or_e),
+                       .set_cause_in(set_cause),
+                       .set_epc_in(set_epc),
+                       .instret_inc_in(instret_inc),
+                       .mie_clear_in(mie_clear),
+                       .mie_set_in(mie_set),
+		       .cause_in(cause),
+		       .real_time_in(ms_riscv32_mp_rc_in),
+		       .misaligned_exception_in(misaligned_exception), //
+		       .csr_data_out(csr_data),
+		       .mie_out(mie),
+		       .epc_out(epc),
+                       .trap_address_out(trap_address),
+		       .meie_out(meie),
+                       .mtie_out(mtie),
+                       .msie_out(msie),
+                       .meip_out(meip),
+                       .mtip_out(mtip),
+                       .msip_out(msip));
+
+//Machine control
+msrv32_machine_control MC     (.clk_in(ms_riscv32_mp_clk_in), 
+                               .reset_in(ms_riscv32_mp_rst_in),
+                               // from control unit
+                               .illegal_instr_in(illegal_instr),
+                               .misaligned_load_in(misaligned_load),
+                               .misaligned_store_in(misaligned_store),
+                               // from pipeline stage 1
+                               .misaligned_instr_in(misaligned_instr),
+                               // from instruction
+                               .opcode_6_to_2_in(opcode[6:2]),
+                               .funct3_in(funct3),
+                               .funct7_in(funct7),
+                               .rs1_addr_in(rs1addr),
+                               .rs2_addr_in(rs2addr),
+                               .rd_addr_in(rdaddr),
+                               // from interrupt controller
+                               .e_irq_in(ms_riscv32_mp_eirq_in),
+                               .t_irq_in(ms_riscv32_mp_tirq_in),
+                               .s_irq_in(ms_riscv32_mp_sirq_in),
+			       // from CSR file
+			       .mie_in(mie), 
+                               .meie_in(meie),
+                               .mtie_in(mtie), 
+                               .msie_in(msie), 
+                               .meip_in(meip),
+                               .mtip_in(mtip),
+                               .msip_in(msip),         
+                               // to CSR file
+                               .i_or_e_out(i_or_e), 
+                               .set_epc_out(set_epc),  
+                               .set_cause_out(set_cause),
+                               .cause_out(cause),
+                               .instret_inc_out(instret_inc), 
+                               .mie_clear_out(mie_clear), 
+                               .mie_set_out(mie_set),
+			       .misaligned_exception_out(misaligned_exception),
+                               // to PC MUX
+                               .pc_src_out(pc_src),
+                               // to pipeline stage 2 register
+                               .flush_out(flush),
+                               // to Control Unit
+                               .trap_taken_out(trap_taken_in1));
+//----------------------------------------------------------------------------------//
+
+//pipeline stage 3 
+//load unit
+
+msrv32_load_unit LU  (.ahb_resp_in(ms_riscv32_mp_hresp_in), 
+                      .load_unsigned_in(load_unsigned_reg),
+                      .ms_riscv32_mp_dmdata_in(ms_riscv32_mp_dmdata_in), 
+                      .iadder_out_1_to_0_in(iadder[1:0]),
+                      .load_size_in(load_size_reg), 
+                      .lu_output_out(lu_output));
+
+//ALU
+msrv32_alu ALU (.op_1_in(rs1_reg), 
+                .op_2_in(op_2), 
+                .opcode_in(alu_opcode_reg), 
+                .result_out(result));
+
+//WB MUX
+msrv32_wb_mux_sel_unit WBM (.alu_result_in(result),
+                            .lu_output_in(lu_output),
+                            .imm_reg_in(imm_reg), 
+                            .iadder_out_reg_in(iadder_out_reg), 
+                            .csr_data_in(csr_data),
+                            .pc_plus_4_reg_in(pc_plus_4_reg), 
+                            .rs2_reg_in(rs2_reg), 
+                            .alu_src_reg_in(alu_src_reg), 
+                            .wb_mux_sel_reg_in(wb_mux_sel_reg),
+                            .wb_mux_out(rd),
+                            .alu_2nd_src_mux_out(op_2));
+
+endmodule

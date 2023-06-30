@@ -1,0 +1,56 @@
+module msrv32_imm_generator_tb();
+reg[31:7] instr;
+reg[6:4] imm_type_in;
+wire[31:0] imm_out;
+
+msrv32_imm_generator DUT(.instr(instr),.imm_type_in(imm_type_in),.imm_out(imm_out));
+
+ task initialize;
+ begin 
+    instr=25'h00000000;
+    imm_type_in=0;
+ end
+ endtask
+
+// Step 3. Declare  tasks with arguments for driving stimulus to DUT 
+
+  task select(input [2:0]i);
+  begin
+   imm_type_in=i;
+  end
+  endtask
+
+  task inps(input [24:0] data);
+  begin
+    instr=data;
+  end
+  endtask
+
+  initial
+  begin
+    initialize;
+    #10;
+    for(i=0;i<8;i=i+1)
+    begin
+      select(i);
+      for(j=0;j<64;j=j+1)
+      begin
+  	inps(j);
+  	#10;
+      end
+    end
+  end
+
+// Step 5. Use $monitor task in a parallel initial block to display inputs and outputs
+
+  initial
+    $monitor("instr=%b,imm_type_in=%b,imm_out=%d\n",instr,imm_type_in,imm_out);
+  
+// Step 6. Use $finish task to finish the simulation in a parallel initial
+// block with appropriate delay
+
+  initial
+    #800 $finish;
+
+endmodule
+  
